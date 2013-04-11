@@ -202,11 +202,28 @@
   )
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;; TBD: Implement the following macros
-;;
+;; Implemented macros
 
-(defmacro group [name & body]
-  ;; Пример
+(defn create-access-map 
+  "Returns a map with a single key - table name - for a list of available columns"
+  [table-name columns]
+   (hash-map (keyword table-name) (vec (map keyword columns))))
+
+(defn get-group
+  "Finds or creates a variable that contains access settings for group by group's name"
+  ([group-name]
+   (intern *ns* (symbol (str group-name "-group"))))
+  ([group-name val]
+   (intern *ns* (symbol (str group-name "-group")) val)))
+
+(defn get-user
+  "Finds or creates a variable that contains access settings for user by user's name"
+  ([user-name]
+   (intern *ns* (symbol (str user-name "-user"))))
+  ([user-name val]
+   (intern *ns* (symbol (str user-name "-user")) val)))
+
+  ;; Пример 
   ;; (group Agent
   ;;      proposal -> [person, phone, address, price]
   ;;      agents -> [clients_id, proposal_id, agent])
@@ -216,17 +233,77 @@
   ;; 3) Создает следующие функции
   ;;    (select-agent-proposal) ;; select person, phone, address, price from proposal;
   ;;    (select-agent-agents)  ;; select clients_id, proposal_id, agent from agents;
-  )
+(defmacro group 
+  "Creates a group called \"\\group-name\\-group\" that represents a map with table names for keys and
+   vector of accessible columns as values. Also creates select functions for each table. Function
+   name is \"select-\\group-name\\-\\table-name\\\""
+  [group-name & access-schema]
+  `(do
+    (->>
+      ;divide into tuples of table name, -> operator (not used, so could be whatever) and vector of columns
+      (partition 3 '~access-schema)
+      ;put pairs of "table-name - columns" into the map  
+      (map #(create-access-map (first %) (nth % 2)))
+      (reduce merge)
+      ;store in the variable
+      (get-group '~group-name)
+     )
+     ;create select function
+     (let [group-var# ~(symbol (str group-name "-group"))
+           group-name# ~(str group-name)
+		       keys# (keys group-var#)]
+		  (doall
+	      (map #((let [table-name# (symbol (name %))
+	                   fields# (get group-var# %)
+                     func-name# (symbol (str "select-" (.toLowerCase  group-name#) "-" (name %)))]
+              (intern *ns* func-name# (fn []
+              ; a solution without an eval would be most desirable
+              (eval (gen-group-select-for-table  table-name# fields#)))))) 
+            keys#)))))
 
-(defmacro user [name & body]
+(defn gen-group-select-for-table
+  "Generates select queries for the table"
+  [table-name columns]
+ `(let [ ~(symbol (str table-name "-fields-var")) ~columns]
+    (select ~table-name (~(symbol "fields") ~@columns))))
+
+;; I wish select queries could be generated with the macros but sadly looks like there is problem
+;; with using this macros in a map and passing the columns parameter to a select macro. Saved just in case.
+;(defmacro gen-group-select-for-table2 [table-name columns]
+;  `(let [~(symbol (str table-name "-fields-var")) ~columns
+;        ]
+;     ;(println proposal-fields-var)
+;     ;(println ~group)
+;     (println ~table-name)
+;     (println ~columns)
+;     (println (map keyword ~columns))
+;     ;(println (:proposal @~group))
+;     ;(intern "" (symbol (str (name table-key) "-fields-var")) table-value)
+;     ;(map #(intern *ns* (symbol (str (name %) "-fields-var")) (% group-name)) table-names)
+;     (select ~table-name (~(symbol "fields") ~columns))
+;     ))
+
   ;; Пример
   ;; (user Ivanov
   ;;     (belongs-to Agent))
   ;; Создает переменные Ivanov-proposal-fields-var = [:person, :phone, :address, :price]
   ;; и Ivanov-agents-fields-var = [:clients_id, :proposal_id, :agent]
-  )
-
-(defmacro with-user [name & body]
+(defmacro user
+  "Creates a variable with access rights for user, similar to the group one"
+  [name & body]
+  `(let [b# '~(first body)
+         group-list# (rest b#)]
+     ;at the moment being all the groups can be overriden by the next one      
+     (->> (map #(deref (get-group (str %))) group-list#)
+       (reduce merge)
+       (get-user '~name)
+       )
+     (doall (map #( let[user-name# ~(str name)
+                 var-name# (symbol (str user-name# "-" (name %) "-fields-var"))]
+             (intern *ns* var-name# (get @(get-user '~name) %))
+             )
+          (keys @(get-user '~name))))))
+  
   ;; Пример
   ;; (with-user Ivanov
   ;;   . . .)
@@ -236,4 +313,13 @@
   ;;    proposal-fields-var и agents-fields-var.
   ;;    Таким образом, функция select, вызванная внутри with-user, получает
   ;;    доступ ко всем необходимым переменным вида <table-name>-fields-var.
-  )
+(defmacro with-user 
+  "Allows to run select queries with user access rights"
+  [user-name & body]
+  (let [b# (first body)
+         table-name#  (second b#)]
+    `(let [;bind the variable with user acces rights to a particular table to a variable required by select macro
+           ;does not check the existance of the variable so select will still throw error in that case
+         ~(symbol (str table-name# "-fields-var")) ~(symbol (str user-name "-" table-name# "-fields-var"))]
+       ;run the select macro
+       ~@body)))
